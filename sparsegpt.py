@@ -133,7 +133,10 @@ class SparseGPT:
                 print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
                 print(torch.sum(Losses))
 
-        torch.cuda.synchronize()
+        if self.dev.type == 'cuda':
+            torch.cuda.synchronize()
+        elif self.dev.type == 'mps':
+            torch.mps.synchronize()
         print('time %.2f' % (time.time() - tick))
         print('error', torch.sum(Losses).item())
 
@@ -148,4 +151,7 @@ class SparseGPT:
             self.inp1 = None
             self.out1 = None
         self.H = None
-        torch.cuda.empty_cache()
+        if self.dev.type == 'cuda':
+            torch.cuda.empty_cache()
+        elif self.dev.type == 'mps':
+            torch.mps.empty_cache()

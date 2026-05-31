@@ -22,7 +22,7 @@ def get_llama(model):
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
     from transformers import LlamaForCausalLM
-    model = LlamaForCausalLM.from_pretrained(model, torch_dtype='auto')
+    model = LlamaForCausalLM.from_pretrained(model, torch_dtype='auto', low_cpu_mem_usage=True)
     model.seqlen = 2048
     return model
 
@@ -37,13 +37,15 @@ def llama_sequential(model, dataloader, dev):
 
     model.model.embed_tokens = model.model.embed_tokens.to(dev)
     model.model.norm = model.model.norm.to(dev)
+    if hasattr(model.model, 'rotary_emb'):
+        model.model.rotary_emb = model.model.rotary_emb.to(dev)
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
     inps = torch.zeros(
         (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
     )
-    cache = {"i": 0, "attention_mask": None}
+    cache = {"i": 0, "kwargs": {}}
 
     class Catcher(nn.Module):
         def __init__(self, module):
@@ -53,7 +55,7 @@ def llama_sequential(model, dataloader, dev):
         def forward(self, inp, **kwargs):
             inps[cache["i"]] = inp
             cache["i"] += 1
-            cache["attention_mask"] = kwargs["attention_mask"]
+            cache["kwargs"] = kwargs
             raise ValueError
 
     layers[0] = Catcher(layers[0])
@@ -67,10 +69,11 @@ def llama_sequential(model, dataloader, dev):
     layers[0] = layers[0].cpu()
     model.model.embed_tokens = model.model.embed_tokens.cpu()
     model.model.norm = model.model.norm.cpu()
-    torch.cuda.empty_cache()
+    if hasattr(model.model, 'rotary_emb'):
+        model.model.rotary_emb = model.model.rotary_emb.cpu()
+    empty_cache(DEV)
 
     outs = torch.zeros_like(inps)
-    attention_mask = cache["attention_mask"]
 
     print("Ready.")
 
@@ -115,7 +118,7 @@ def llama_sequential(model, dataloader, dev):
             for name in subset:
                 handles.append(subset[name].register_forward_hook(add_batch(name)))
             for j in range(args.nsamples):
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+                outs[j] = layer(inps[j].unsqueeze(0), **cache["kwargs"])[0]
             for h in handles:
                 h.remove()
 
@@ -133,12 +136,12 @@ def llama_sequential(model, dataloader, dev):
                 gpts[name].free()
 
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+            outs[j] = layer(inps[j].unsqueeze(0), **cache["kwargs"])[0]
 
         layers[i] = layer.cpu()
         del layer
         del gpts
-        torch.cuda.empty_cache()
+        empty_cache(DEV)
 
         inps, outs = outs, inps
 
@@ -159,13 +162,15 @@ def llama_eval(model, testenc, dev,  dataset: str, log_wandb: bool = False):
     layers = model.model.layers
 
     model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    if hasattr(model.model, 'rotary_emb'):
+        model.model.rotary_emb = model.model.rotary_emb.to(dev)
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
     inps = torch.zeros(
         (nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
     )
-    cache = {"i": 0, "attention_mask": None}
+    cache = {"i": 0, "kwargs": {}}
 
     class Catcher(nn.Module):
         def __init__(self, module):
@@ -175,7 +180,7 @@ def llama_eval(model, testenc, dev,  dataset: str, log_wandb: bool = False):
         def forward(self, inp, **kwargs):
             inps[cache["i"]] = inp
             cache["i"] += 1
-            cache["attention_mask"] = kwargs["attention_mask"]
+            cache["kwargs"] = kwargs
             raise ValueError
 
     layers[0] = Catcher(layers[0])
@@ -189,10 +194,11 @@ def llama_eval(model, testenc, dev,  dataset: str, log_wandb: bool = False):
 
     layers[0] = layers[0].cpu()
     model.model.embed_tokens = model.model.embed_tokens.cpu()
-    torch.cuda.empty_cache()
+    if hasattr(model.model, 'rotary_emb'):
+        model.model.rotary_emb = model.model.rotary_emb.cpu()
+    empty_cache(dev)
 
     outs = torch.zeros_like(inps)
-    attention_mask = cache["attention_mask"]
 
     for i in range(len(layers)):
         print(i)
@@ -208,10 +214,10 @@ def llama_eval(model, testenc, dev,  dataset: str, log_wandb: bool = False):
                 W.data[torch.abs(W.data) <= thresh] = 0
 
         for j in range(nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+            outs[j] = layer(inps[j].unsqueeze(0), **cache["kwargs"])[0]
         layers[i] = layer.cpu()
         del layer
-        torch.cuda.empty_cache()
+        empty_cache(dev)
         inps, outs = outs, inps
 
     if model.model.norm is not None:

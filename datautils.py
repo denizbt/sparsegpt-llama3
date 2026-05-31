@@ -3,7 +3,7 @@ import random
 import numpy as np
 import torch
 from datasets import load_dataset
-from transformers import AutoTokenizer, LlamaTokenizer
+from transformers import AutoTokenizer
 
 
 def set_seed(seed):
@@ -11,18 +11,7 @@ def set_seed(seed):
     torch.random.manual_seed(seed)
 
 def get_tokenizer(model):
-    if "llama" in model.lower():
-        tokenizer = LlamaTokenizer.from_pretrained(model, use_fast=False)
-        # fix for transformer 4.28.0.dev0 compatibility
-        if tokenizer.bos_token_id != 1 or tokenizer.eos_token_id != 2:
-            try:
-                tokenizer.bos_token_id = 1
-                tokenizer.eos_token_id = 2
-            except AttributeError:
-                pass
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
-    return tokenizer
+    return AutoTokenizer.from_pretrained(model, use_fast=False)
 
 def get_wikitext2(nsamples, seed, seqlen, model, tokenizer):
     
@@ -44,8 +33,8 @@ def get_wikitext2(nsamples, seed, seqlen, model, tokenizer):
     return trainloader, testenc
 
 def get_ptb(nsamples, seed, seqlen, model, tokenizer):
-    traindata = load_dataset('ptb_text_only', 'penn_treebank', split='train')
-    testdata = load_dataset('ptb_text_only', 'penn_treebank', split='test')
+    traindata = load_dataset('ptb_text_only', 'penn_treebank', split='train', trust_remote_code=True)
+    testdata = load_dataset('ptb_text_only', 'penn_treebank', split='test', trust_remote_code=True)
 
     trainenc = tokenizer(" ".join(traindata['sentence']), return_tensors='pt')
     testenc = tokenizer(" ".join(testdata['sentence']), return_tensors='pt')

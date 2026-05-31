@@ -2,10 +2,23 @@ import torch
 import torch.nn as nn
 
 
-DEV = torch.device('cuda:0')
+if torch.cuda.is_available():
+    DEV = torch.device('cuda:0')
+elif torch.backends.mps.is_available():
+    DEV = torch.device('mps')
+else:
+    DEV = torch.device('cpu')
 
 
-def find_layers(module, layers=[nn.Conv2d, nn.Linear], name=''):
+def empty_cache(dev):
+    if dev.type == 'cuda':
+        torch.cuda.empty_cache()
+    elif dev.type == 'mps':
+        torch.mps.empty_cache()
+
+def find_layers(module, layers=None, name=''):
+    if layers is None:
+        layers = [nn.Conv2d, nn.Linear]
     if type(module) in layers:
         return {name: module}
     res = {}
