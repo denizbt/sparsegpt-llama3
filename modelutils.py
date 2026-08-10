@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import transformers
 
 
 if torch.cuda.is_available():
@@ -18,7 +19,10 @@ def empty_cache(dev):
 
 def find_layers(module, layers=None, name=''):
     if layers is None:
-        layers = [nn.Conv2d, nn.Linear]
+        # GPT-2 stores its dense projections as Hugging Face Conv1D modules.
+        # SparseGPT already knows how to transpose their weights; make sure the
+        # model traversal can discover them as well.
+        layers = [nn.Conv2d, nn.Linear, transformers.pytorch_utils.Conv1D]
     if type(module) in layers:
         return {name: module}
     res = {}
