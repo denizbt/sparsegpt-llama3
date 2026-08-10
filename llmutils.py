@@ -1,8 +1,6 @@
-"""SparseGPT driver for supported decoder-only language models.
+"""Shared layer-wise SparseGPT workflow for architecture-specific LLM scripts."""
 
-The architecture adapter only describes how to traverse a Hugging Face model.
-The pruning objective and update rule remain implemented by ``SparseGPT``.
-"""
+from __future__ import annotations
 
 import argparse
 import time
@@ -27,40 +25,6 @@ class Architecture:
     sequential_groups: tuple[tuple[str, ...], ...]
 
 
-LLAMA_LIKE_GROUPS = (
-    ("self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"),
-    ("self_attn.o_proj",),
-    ("mlp.up_proj", "mlp.gate_proj"),
-    ("mlp.down_proj",),
-)
-
-ARCHITECTURES = {
-    "llama": Architecture(
-        "model.layers", ("model.embed_tokens", "model.rotary_emb"),
-        "model.norm", "lm_head", LLAMA_LIKE_GROUPS,
-    ),
-    "mistral": Architecture(
-        "model.layers", ("model.embed_tokens", "model.rotary_emb"),
-        "model.norm", "lm_head", LLAMA_LIKE_GROUPS,
-    ),
-    # Transformers uses model_type="qwen2" for Qwen2.5 checkpoints.
-    "qwen2": Architecture(
-        "model.layers", ("model.embed_tokens", "model.rotary_emb"),
-        "model.norm", "lm_head", LLAMA_LIKE_GROUPS,
-    ),
-    "gpt2": Architecture(
-        "transformer.h", ("transformer.wte", "transformer.wpe"),
-        "transformer.ln_f", "lm_head",
-        (
-            ("attn.c_attn",),
-            ("attn.c_proj",),
-            ("mlp.c_fc",),
-            ("mlp.c_proj",),
-        ),
-    ),
-}
-
-
 def resolve_attr(obj, path):
     for part in path.split("."):
         obj = getattr(obj, part)
@@ -73,16 +37,6 @@ def set_attr(obj, path, value):
     setattr(parent, parts[-1], value)
 
 
-def get_architecture(model_type):
-    try:
-        return ARCHITECTURES[model_type]
-    except KeyError as exc:
-        supported = ", ".join(sorted(ARCHITECTURES))
-        raise ValueError(
-            f"Unsupported model type {model_type!r}; supported types: {supported}"
-        ) from exc
-
-
 def infer_seqlen(config, requested=None):
     if requested is not None:
         return requested
@@ -93,14 +47,18 @@ def infer_seqlen(config, requested=None):
     return 2048
 
 
-def load_model(model_name, seqlen=None):
+def load_model(model_name, expected_model_type, seqlen=None):
     config = AutoConfig.from_pretrained(model_name)
-    architecture = get_architecture(config.model_type)
+    if config.model_type != expected_model_type:
+        raise ValueError(
+            f"Expected a {expected_model_type!r} checkpoint, got "
+            f"config.model_type={config.model_type!r}"
+        )
     model = AutoModelForCausalLM.from_pretrained(
         model_name, torch_dtype="auto", low_cpu_mem_usage=True
     )
     model.seqlen = infer_seqlen(model.config, seqlen)
-    return model, architecture
+    return model
 
 
 def move_optional(model, paths, device):
@@ -121,7 +79,6 @@ def capture_inputs(model, architecture, batches, nsamples, device):
     blocks = resolve_attr(model, architecture.block_path)
     moved_paths = move_optional(model, architecture.input_paths, device)
     blocks[0] = blocks[0].to(device)
-
     dtype = next(iter(model.parameters())).dtype
     inputs = torch.zeros(
         (nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=device
@@ -158,7 +115,6 @@ def capture_inputs(model, architecture, batches, nsamples, device):
     blocks[0] = blocks[0].cpu()
     move_optional(model, moved_paths, torch.device("cpu"))
     empty_cache(device)
-
     if cache["index"] != nsamples:
         raise RuntimeError(f"Captured {cache['index']} samples, expected {nsamples}")
     if cache["kwargs"] is None:
@@ -186,11 +142,10 @@ def prune_model(model, architecture, dataloader, args, device=DEV):
             print(f"Block {block_index}/{len(blocks) - 1}")
             block = blocks[block_index].to(device)
             all_layers = find_layers(block)
-            if args.true_sequential:
-                groups = architecture.sequential_groups
-            else:
-                groups = (tuple(all_layers),)
-
+            groups = (
+                architecture.sequential_groups
+                if args.true_sequential else (tuple(all_layers),)
+            )
             for names in groups:
                 subset = {
                     name: all_layers[name]
@@ -199,7 +154,6 @@ def prune_model(model, architecture, dataloader, args, device=DEV):
                 }
                 if not subset:
                     continue
-
                 pruners = {name: SparseGPT(layer) for name, layer in subset.items()}
                 if args.wbits < 16:
                     for pruner in pruners.values():
@@ -213,7 +167,6 @@ def prune_model(model, architecture, dataloader, args, device=DEV):
                     def add_batch(_, hook_inputs, hook_output, name=name):
                         pruners[name].add_batch(hook_inputs[0].data, hook_output.data)
                     handles.append(layer.register_forward_hook(add_batch))
-
                 for sample in range(args.nsamples):
                     outputs[sample] = block(
                         inputs[sample].unsqueeze(0), *block_args, **block_kwargs
@@ -247,7 +200,6 @@ def evaluate(model, architecture, test_encoding, device=DEV):
     nsamples = input_ids.numel() // model.seqlen
     if nsamples == 0:
         raise ValueError("Evaluation data is shorter than one model sequence")
-
     batches = [
         (input_ids[:, i * model.seqlen:(i + 1) * model.seqlen], None)
         for i in range(nsamples)
@@ -259,9 +211,7 @@ def evaluate(model, architecture, test_encoding, device=DEV):
         model, architecture, batches, nsamples, device
     )
     outputs = torch.zeros_like(inputs)
-
-    final_norm = None
-    head = None
+    final_norm = head = None
     try:
         for index in range(len(blocks)):
             block = blocks[index].to(device)
@@ -311,8 +261,8 @@ def report_sparsity(model, architecture):
     return ratio
 
 
-def build_parser():
-    parser = argparse.ArgumentParser(description=__doc__)
+def build_parser(description):
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("model", help="Hugging Face model name or local path")
     parser.add_argument("dataset", choices=["wikitext2", "ptb", "c4"])
     parser.add_argument("--seed", type=int, default=0)
@@ -348,34 +298,27 @@ def validate_args(args):
         raise ValueError("--nsamples and --blocksize must be positive")
 
 
-def main():
-    args = build_parser().parse_args()
+def run_cli(architecture, expected_model_type, description):
+    args = build_parser(description).parse_args()
     validate_args(args)
-    model, architecture = load_model(args.model, args.seqlen)
+    model = load_model(args.model, expected_model_type, args.seqlen)
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
     dataloader, _ = get_loaders(
         args.dataset, nsamples=args.nsamples, seed=args.seed,
         seqlen=model.seqlen, model=args.model, tokenizer=tokenizer,
     )
-
     if args.sparsity or args.prunen:
         start = time.time()
         prune_model(model, architecture, dataloader, args)
         print(f"Pruning completed in {time.time() - start:.1f}s")
     report_sparsity(model, architecture)
-
     for dataset in args.eval_datasets:
         _, test_encoding = get_loaders(
             dataset, seed=args.seed, seqlen=model.seqlen,
             model=args.model, tokenizer=tokenizer,
         )
         print(f"{dataset} perplexity: {evaluate(model, architecture, test_encoding):.3f}")
-
     if args.save:
         model.save_pretrained(args.save)
         tokenizer.save_pretrained(args.save)
-
-
-if __name__ == "__main__":
-    main()

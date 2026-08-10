@@ -16,14 +16,14 @@ Transformers is required for Llama 3, Mistral, and Qwen2.5 support.
 
 ## Supported language models
 
-The unified `llm.py` entry point supports these Hugging Face model types:
+The architecture-specific scripts support these Hugging Face model types:
 
-| Family | `config.model_type` | Example checkpoint |
-| --- | --- | --- |
-| Llama 2 and Llama 3 | `llama` | `meta-llama/Meta-Llama-3-8B` |
-| Mistral | `mistral` | `mistralai/Mistral-7B-v0.1` |
-| Qwen2.5 | `qwen2` (Hugging Face identifier) | `Qwen/Qwen2.5-7B` |
-| GPT-2 | `gpt2` | `openai-community/gpt2` |
+| Family | Script | `config.model_type` | Example checkpoint |
+| --- | --- | --- | --- |
+| Llama 2 and Llama 3 | `llama.py` | `llama` | `meta-llama/Meta-Llama-3-8B` |
+| Mistral | `mistral.py` | `mistral` | `mistralai/Mistral-7B-v0.1` |
+| Qwen2.5 | `qwen.py` | `qwen2` (Hugging Face identifier) | `Qwen/Qwen2.5-7B` |
+| GPT-2 | `gpt2.py` | `gpt2` | `openai-community/gpt2` |
 
 This includes the requested Llama 2 7B/70B, Llama 3 8B, Mistral 7B,
 Qwen2.5 7B, and GPT-2 Small checkpoints. For Qwen, the supported target is
@@ -36,25 +36,109 @@ adding a different mask-selection objective.
 
 ## Usage
 
-Use `llm.py` for all newly supported language models:
+Use the model-specific script for each architecture:
 
 ```
 # Llama 3 8B, 50% unstructured sparsity
-python llm.py meta-llama/Meta-Llama-3-8B c4 --sparsity .5
+python llama.py meta-llama/Meta-Llama-3-8B c4 --sparsity .5
 
 # Mistral 7B, 2:4 sparsity
-python llm.py mistralai/Mistral-7B-v0.1 c4 --prunen 2 --prunem 4
+python mistral.py mistralai/Mistral-7B-v0.1 c4 --prunen 2 --prunem 4
 
 # Qwen2.5 7B
-python llm.py Qwen/Qwen2.5-7B c4 --sparsity .5
+python qwen.py Qwen/Qwen2.5-7B c4 --sparsity .5
 
 # GPT-2 Small
-python llm.py openai-community/gpt2 c4 --sparsity .5
+python gpt2.py openai-community/gpt2 c4 --sparsity .5
 ```
 
 Calibration defaults remain 128 samples of up to 2048 tokens, 1% Hessian dampening, and a pruning block size of 128. Use `--seqlen` to select a shorter calibration length for smoke tests. Model access approval is required for gated Meta checkpoints. Llama 2 70B also requires enough CPU memory to hold the model while one transformer block at a time is processed on the accelerator.
 
 The older architecture-specific scripts below remain available for reproducing the original repository commands.
+
+## How the new model drivers work
+
+`mistral.py`, `qwen.py`, and `gpt2.py` follow the original repository's
+one-file-per-architecture style. Each file defines its model paths and
+true-sequential projection groups, then calls the repeated workflow in the
+lightweight `llmutils.py` helper. The existing `llama.py`, `opt.py`, and
+`bloom.py` files are unchanged.
+
+Adding the new drivers did **not** change the pruning algorithm in
+`sparsegpt.py`. In particular, the following SparseGPT operations are unchanged:
+
+1. Forward hooks collect each selected layer's calibration inputs.
+2. `SparseGPT.add_batch` accumulates the input-based approximate Hessian.
+3. `SparseGPT.fasterprune` adds the configured diagonal dampening (1% by
+   default), computes the inverse-Hessian factor using Cholesky operations, and
+   processes weights in blocks of 128 columns by default.
+4. The existing Hessian-aware score selects either the requested fraction of
+   weights for unstructured pruning or N weights in every group of M.
+5. Each removed weight's local error is propagated to the remaining weights in
+   the block and then to later blocks of columns.
+6. The updated block output becomes the input calibration data for the next
+   transformer block. There is no training, gradient descent, or recovery
+   fine-tuning.
+
+The shared helper changes the surrounding model-specific process as follows:
+
+- It uses `AutoConfig` and `AutoModelForCausalLM`; each model-specific file
+  supplies the expected Hugging Face model type and architecture paths.
+- It locates the transformer blocks, input embeddings, final normalization, and
+  language-model head through architecture-specific paths.
+- It captures and replays all positional and keyword arguments passed to the
+  first transformer block. This accommodates rotary-position inputs, causal
+  masks, and other arguments used by current Transformers versions.
+- It processes one transformer block on the selected device at a time and moves
+  the completed block back to CPU, preserving the original layer-wise memory
+  strategy.
+- It derives the calibration sequence length from the model configuration,
+  capped at the paper-style default of 2048 tokens, unless `--seqlen` is given.
+- It adds argument validation, complete transformer-block sparsity reporting,
+  reusable tokenizer loading, and tokenizer saving alongside model weights.
+- It adds discovery of Hugging Face `Conv1D` modules. This is required for
+  GPT-2; `sparsegpt.py` already contained the corresponding transpose logic.
+- Perplexity evaluation uses the number of predicted next-token labels
+  (`sequence_length - 1`) in its normalization. This affects only reporting,
+  not pruning or mask selection.
+
+The new drivers do not include the older scripts' magnitude-pruning or
+W&B logging paths. Optional weight quantization remains available through
+`--wbits`, but the default `--wbits 16` performs sparsification only.
+
+### Weights pruned by default
+
+Only dense projection weights inside every transformer block are passed to
+SparseGPT. The default selection is:
+
+| Model family | Pruned module names in each transformer block |
+| --- | --- |
+| Llama 2/3 | `self_attn.q_proj`, `self_attn.k_proj`, `self_attn.v_proj`, `self_attn.o_proj`, `mlp.gate_proj`, `mlp.up_proj`, `mlp.down_proj` |
+| Mistral | `self_attn.q_proj`, `self_attn.k_proj`, `self_attn.v_proj`, `self_attn.o_proj`, `mlp.gate_proj`, `mlp.up_proj`, `mlp.down_proj` |
+| Qwen2.5 | `self_attn.q_proj`, `self_attn.k_proj`, `self_attn.v_proj`, `self_attn.o_proj`, `mlp.gate_proj`, `mlp.up_proj`, `mlp.down_proj` |
+| GPT-2 | `attn.c_attn` (combined Q/K/V), `attn.c_proj`, `mlp.c_fc`, `mlp.c_proj` |
+
+SparseGPT changes each selected module's `weight` tensor. Biases are not
+pruned. The following parameters remain dense:
+
+- Token and positional embeddings
+- Rotary-position modules
+- Normalization layers
+- Bias tensors
+- The final language-model head
+- Any parameter outside the transformer-block list
+
+With no layer filters, `--sparsity .5` applies an approximately 50% mask to
+each discovered projection. `--prunen 2 --prunem 4` instead applies exactly two
+zeros per group of four along SparseGPT's input-column dimension. `--minlayer`,
+`--maxlayer`, `--prune-only`, and `--invert` can restrict this default scope.
+
+With `--true-sequential`, projections are calibrated and pruned in dependency
+groups. Llama, Mistral, and Qwen2.5 use Q/K/V, attention output, MLP up/gate,
+and MLP down groups. GPT-2 uses combined Q/K/V, attention output, MLP input,
+and MLP output groups. Without the flag, all selected projections in a
+transformer block collect statistics from the same block input pass, matching
+the older scripts' default behavior.
 
 Here are some sample commands to run baselines and sparsification on OPT models, followed by perplexity evaluations on raw-WikiText2, PTB and C4.
 See also the CMD-argument documentation.
