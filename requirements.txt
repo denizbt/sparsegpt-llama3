@@ -3,3 +3,4 @@ transformers>=4.43
 datasets>=2.16
 accelerate>=0.26
 sentencepiece>=0.1.99
+Pillow>=9.0

@@ -140,6 +140,113 @@ and MLP output groups. Without the flag, all selected projections in a
 transformer block collect statistics from the same block input pass, matching
 the older scripts' default behavior.
 
+## ViT image-classification support
+
+`vit.py` applies the unchanged SparseGPT algorithm to the linear projections in
+each Hugging Face ViT encoder block. It prunes:
+
+- `attention.attention.query`, `key`, and `value`
+- `attention.output.dense`
+- `intermediate.dense`
+- `output.dense`
+
+The convolutional patch embedding, class and position embeddings, layer
+normalizations, biases, and classification head remain dense. Calibration uses
+a fixed, seeded random sample of images from the ImageNet training split;
+labels are not used for pruning. Images receive the checkpoint's standard
+`AutoImageProcessor` preprocessing without training-time augmentation.
+Evaluation reports validation loss, top-1 accuracy, and top-5 accuracy.
+
+### Required: download ImageNet before running
+
+ViT sparsification in this repository supports **ImageNet-1k only**. ImageNet
+is not bundled with the code, and `vit.py` never downloads it. Before running
+the script, obtain ImageNet access and prepare one of these two sources:
+
+1. An extracted local ImageNet ImageFolder tree.
+2. A complete Hugging Face cache for `ILSVRC/imagenet-1k`.
+
+Calibration requires the ImageNet training split. Evaluation additionally
+requires the official validation split and its labels. Labels are ignored
+during calibration. `--skip-eval` permits pruning with training images only.
+
+For a local ImageFolder, prepare:
+
+```
+IMAGENET_ROOT/
+  train/<class-name>/*.JPEG
+  validation/<class-name>/*.JPEG
+```
+
+Then run, for example:
+
+```
+python vit.py google/vit-base-patch16-224 IMAGENET_ROOT \
+  --calibration-size 512 --sparsity .5 --save outputs/vit-base-50
+```
+
+For Hugging Face, first accept the ImageNet dataset conditions, authenticate on your terminal, and download:
+
+```
+hf auth login
+python -c "from datasets import load_dataset; load_dataset('ILSVRC/imagenet-1k')"
+```
+
+After that command finishes successfully, use the cache without network access:
+```
+python vit.py google/vit-base-patch16-224 \
+  --cached-imagenet \
+  --calibration-size 512 --sparsity .5 --save outputs/vit-base-50
+```
+
+`--cached-imagenet` is deliberately offline: if the Hugging Face cache is
+missing any required files, the script stops instead of downloading them.
+`--dataset-cache PATH` selects a non-default processed-dataset cache. The loader
+does not accept arbitrary image datasets or silently substitute another source.
+
+For ImageFolder data, class-directory ordering must match the checkpoint's ImageNet label indices; otherwise top-1 and top-5 metrics are invalid even though pruning itself can run.
+
+Use `--prunen 2 --prunem 4` for full 2:4 sparsity, `--skip-eval` to omit ImageNet validation, or `--true-sequential` to calibrate and prune attention Q/K/V, attention output, MLP input, and MLP output as separate dependency groups. Use `--device cpu` if the selected accelerator does not implement the Cholesky operation required by SparseGPT.
+
+### ViT calibration decisions
+
+Calibration images directly determine SparseGPT's activation Hessians, pruning masks, and compensated surviving weights. The target sparsity is independent of calibration size, but post-pruning accuracy is not.
+
+The default is **512 calibration images**. This is a ViT-specific engineering choice, not decided by the SparseGPT paper (which doesn't provide results on ViT). The paper used 128 C4
+segments of 2048 text tokens each. A 224x224 ViT with 16x16 patches produces 196 patch tokens plus one class token, or 197 token activations per image. Thus, 512 images provide about 100,864 token activations, whereas the paper's language setup provides 262,144. These counts are only a rough comparison because image patches and text tokens have different statistics.
+
+We chose 512 because preliminary ViT-Tiny measurements continued to improve between 128 and 512 calibration images, while 512 remains practical on modest hardware. For final experiments, run the calibration-size ablation and consider 1024 images if accuracy is still improving. Override the default with
+`--calibration-size` or `--nsamples` (aliases).
+
+Calibration sampling is without replacement and deterministic for `--seed`.
+The ablation sizes use nested prefixes of the same seeded ordering, so a
+128-image run is a strict subset of the corresponding 512-image run. Limited
+evaluation selected with `--eval-samples` is also seeded and fixed across all
+ablation points. Use training images for calibration and the official validation
+split for metrics.
+
+### ViT calibration-size ablation
+
+`vit_ablation.py` reloads the same dense checkpoint for every calibration size,
+uses nested prefixes from one seeded random ordering of the ImageNet training
+split, and writes dense and sparse metrics to CSV. For a Mac-scale first run:
+
+```
+python vit_ablation.py WinKawaks/vit-tiny-patch16-224 \
+  --cached-imagenet \
+  --calibration-sizes 32 128 512 \
+  --eval-samples 1000 \
+  --output ../vit-ablation/results.csv
+```
+
+The CSV contains calibration size, achieved transformer-block sparsity,
+validation loss, top-1/top-5 accuracy, accuracy drops relative to the dense
+checkpoint, and pruning time. `--save-dir ../vit-ablation/models` additionally
+saves each sparse checkpoint and its image processor. Omit `--eval-samples` for
+the full validation set. A randomly initialized tiny ViT is useful for testing
+the ablation mechanics, but a pretrained checkpoint is required for meaningful
+accuracy comparisons.
+
 Here are some sample commands to run baselines and sparsification on OPT models, followed by perplexity evaluations on raw-WikiText2, PTB and C4.
 See also the CMD-argument documentation.
 
