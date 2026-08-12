@@ -30,7 +30,7 @@ class ProcessedImageDataset(Dataset):
 def get_imagenet_loaders(
     root,
     processor,
-    nsamples=512,
+    nsamples=4096,
     seed=0,
     eval_batch_size=32,
     train_split="train",

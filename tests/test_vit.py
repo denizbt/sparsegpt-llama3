@@ -57,7 +57,7 @@ def test_vit_architecture_selects_encoder_only():
 
 
 def test_vit_calibration_size_default_and_aliases():
-    assert build_parser().parse_args(["model", "images"]).nsamples == 512
+    assert build_parser().parse_args(["model", "images"]).nsamples == 4096
     assert build_parser().parse_args(
         ["model", "images", "--calibration-size", "128"]
     ).nsamples == 128

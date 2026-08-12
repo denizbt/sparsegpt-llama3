@@ -182,7 +182,7 @@ Then run, for example:
 
 ```
 python vit.py google/vit-base-patch16-224 IMAGENET_ROOT \
-  --calibration-size 512 --sparsity .5 --save outputs/vit-base-50
+  --calibration-size 4096 --sparsity .5 --save outputs/vit-base-50
 ```
 
 For Hugging Face, first accept the ImageNet dataset conditions, authenticate on your terminal, and download:
@@ -196,7 +196,7 @@ After that command finishes successfully, use the cache without network access:
 ```
 python vit.py google/vit-base-patch16-224 \
   --cached-imagenet \
-  --calibration-size 512 --sparsity .5 --save outputs/vit-base-50
+  --calibration-size 4096 --sparsity .5 --save outputs/vit-base-50
 ```
 
 `--cached-imagenet` is deliberately offline: if the Hugging Face cache is
@@ -212,18 +212,24 @@ Use `--prunen 2 --prunem 4` for full 2:4 sparsity, `--skip-eval` to omit ImageNe
 
 Calibration images directly determine SparseGPT's activation Hessians, pruning masks, and compensated surviving weights. The target sparsity is independent of calibration size, but post-pruning accuracy is not.
 
-The default is **512 calibration images**. This is a ViT-specific engineering choice, not decided by the SparseGPT paper (which doesn't provide results on ViT). The paper used 128 C4
-segments of 2048 text tokens each. A 224x224 ViT with 16x16 patches produces 196 patch tokens plus one class token, or 197 token activations per image. Thus, 512 images provide about 100,864 token activations, whereas the paper's language setup provides 262,144. These counts are only a rough comparison because image patches and text tokens have different statistics.
+The default is **4096 calibration images**. This choice follows the vision
+pruning protocol in [Appendix A of the Wanda
+paper](https://arxiv.org/pdf/2306.11695), which studies one-shot pruning of
+ImageNet-1K-pretrained ConvNeXt-B and DeiT-B models. The authors randomly sample
+4096 images from the ImageNet training set, prune linear layers only, and report
+that results are stable at 4096 samples, with only marginal effects from adding
+more calibration images.
 
-We chose 512 because preliminary ViT-Tiny measurements continued to improve between 128 and 512 calibration images, while 512 remains practical on modest hardware. For final experiments, run the calibration-size ablation and consider 1024 images if accuracy is still improving. Override the default with
-`--calibration-size` or `--nsamples` (aliases).
+This is a literature-backed vision calibration default, not an exact
+reproduction of a SparseGPT vision experiment: Appendix A applies Wanda and
+magnitude pruning rather than SparseGPT. We adopt its dataset and sample count
+because DeiT is a Vision Transformer and the paper directly studies calibration
+for one-shot pruning of image classifiers. Our preliminary SparseGPT ViT-Tiny ablation also showed continued accuracy improvement between 128 and 512 images, supporting the use of a larger calibration set for final runs.
 
-Calibration sampling is without replacement and deterministic for `--seed`.
-The ablation sizes use nested prefixes of the same seeded ordering, so a
-128-image run is a strict subset of the corresponding 512-image run. Limited
-evaluation selected with `--eval-samples` is also seeded and fixed across all
-ablation points. Use training images for calibration and the official validation
-split for metrics.
+For lower-cost development or Mac testing, explicitly use
+`--calibration-size 512`. For reported experiments, keep the 4096-image default unless a calibration-size ablation justifies another value. Override the default with `--calibration-size` or its backward-compatible alias `--nsamples`.
+
+Calibration sampling is without replacement and deterministic for `--seed`. The ablation sizes use nested prefixes of the same seeded ordering, so a 128-image run is a strict subset of the corresponding 512-image run. Limited evaluation selected with `--eval-samples` is also seeded and fixed across all ablation points. Use training images for calibration and the official validation split for metrics.
 
 ### ViT calibration-size ablation
 
@@ -234,21 +240,14 @@ split, and writes dense and sparse metrics to CSV. For a Mac-scale first run:
 ```
 python vit_ablation.py WinKawaks/vit-tiny-patch16-224 \
   --cached-imagenet \
-  --calibration-sizes 32 128 512 \
+  --calibration-sizes 128 512 1024 2048 4096 \
   --eval-samples 1000 \
   --output ../vit-ablation/results.csv
 ```
 
-The CSV contains calibration size, achieved transformer-block sparsity,
-validation loss, top-1/top-5 accuracy, accuracy drops relative to the dense
-checkpoint, and pruning time. `--save-dir ../vit-ablation/models` additionally
-saves each sparse checkpoint and its image processor. Omit `--eval-samples` for
-the full validation set. A randomly initialized tiny ViT is useful for testing
-the ablation mechanics, but a pretrained checkpoint is required for meaningful
-accuracy comparisons.
+The CSV contains calibration size, achieved transformer-block sparsity, validation loss, top-1/top-5 accuracy, accuracy drops relative to the dense checkpoint, and pruning time. `--save-dir ../vit-ablation/models` additionally saves each sparse checkpoint and its image processor. Omit `--eval-samples` for the full validation set. A randomly initialized tiny ViT is useful for testing the ablation mechanics, but a pretrained checkpoint is required for meaningful accuracy comparisons.
 
-Here are some sample commands to run baselines and sparsification on OPT models, followed by perplexity evaluations on raw-WikiText2, PTB and C4.
-See also the CMD-argument documentation.
+Here are some sample commands to run baselines and sparsification on OPT models, followed by perplexity evaluations on raw-WikiText2, PTB and C4. See also the CMD-argument documentation.
 
 ```
 # Run dense baseline

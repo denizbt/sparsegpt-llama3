@@ -51,8 +51,8 @@ def build_parser():
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
-        "--calibration-size", "--nsamples", dest="nsamples", type=int, default=512,
-        help="Number of calibration images (default: 512)",
+        "--calibration-size", "--nsamples", dest="nsamples", type=int, default=4096,
+        help="Number of calibration images (default: 4096)",
     )
     parser.add_argument("--eval-batch-size", type=int, default=32)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto")
