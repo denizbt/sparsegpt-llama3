@@ -1,3 +1,9 @@
+# Model Support Expansion
+
+This repository adapts the original Wanda codebase to support additional model architectures (Qwen, Mistral etc). We are not the authors of the original project; we have edited the original README to explain how to use our additional code.
+
+---
+
 # SparseGPT
 
 This repository contains code to reproduce the key results of the paper [SparseGPT: Massive Language Models Can be Accurately Pruned in One-shot](https://arxiv.org/abs/2301.00774).
